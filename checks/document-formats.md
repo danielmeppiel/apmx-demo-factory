@@ -106,7 +106,8 @@ targets must exist in the combined candidate (the repository's `src/`,
 `tests/`, `docs/`, `acceptance/` and `README.md`, plus the delivered changes);
 H2 fragments must exist. Absolute HTTP(S) links are allowed but not fetched.
 
-The documentation checker requires at least one line that the patch adds or
-rewrites to link to a `src/` file that the code patch changed. Another check reruns the repository's
+The documentation checker requires at least one edited page to link to a
+`src/` file that the code patch changed: document the change on the page that
+documents the changed code. Another check reruns the repository's
 acceptance scenarios and unittest suite on the code-plus-docs tree. These
 finite checks do not prove that all prose is semantically correct.

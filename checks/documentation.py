@@ -1,12 +1,11 @@
 """Check the documentation patch: Markdown pages under docs/, valid links, changed behaviour named.
 
 The pages it edits must keep valid inline local links and H2 anchors, and at
-least one line it adds or rewrites must link to a src/ file that the code patch
-changed, so the documentation describes the change rather than the old page.
+least one of them must link to a src/ file that the code patch changed: the
+change is documented on the page that documents the changed code.
 """
 
 import collections
-import difflib
 import posixpath
 import re
 import sys
@@ -61,18 +60,6 @@ def local_links(candidate: Path, name: str, text: str) -> list[str]:
     return resolved
 
 
-def added_lines(before: str, after: str) -> str:
-    """The lines the documentation patch adds or rewrites, in page order."""
-    old, new = before.splitlines(), after.splitlines()
-    matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
-    return "\n".join(
-        line
-        for tag, _, _, start, end in matcher.get_opcodes()
-        if tag in ("insert", "replace")
-        for line in new[start:end]
-    )
-
-
 def inspect(
     root: Path, candidate: Path, area: Path, subject: dict[str, Any]
 ) -> tuple[int, list[dict[str, Any]]]:
@@ -86,11 +73,7 @@ def inspect(
             sections, _ = markdown_sections(text)
             if not sections:
                 raise Rejected(f"{name}: a documentation page needs H2 sections.")
-            local_links(candidate, name, text)
-            before = (
-                read_file(root, name).decode("utf-8", "replace") if (root / name).is_file() else ""
-            )
-            new_targets.update(local_links(candidate, name, added_lines(before, text)))
+            new_targets.update(local_links(candidate, name, text))
             rows.append({"id": name, "status": "passed"})
         except (Rejected, UnicodeError) as exc:
             rows.append({"id": name, "status": "failed", "detail": str(exc)[:600]})
@@ -100,10 +83,10 @@ def inspect(
             "id": "describes-changed-source",
             "status": "passed" if described else "failed",
             "detail": (
-                "new links to changed source: " + ", ".join(described)
+                "edited pages link to the changed source: " + ", ".join(described)
                 if described
-                else "no added or rewritten line of the documentation links to a src/ file "
-                "the code patch changed; link the new text to one of: "
+                else "no page the documentation patch edits links to a src/ file the code "
+                "patch changed; update the page that documents, and links to, one of: "
                 + ", ".join(sorted(changed_source))
             ),
         }

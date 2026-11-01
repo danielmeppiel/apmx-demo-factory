@@ -45,7 +45,7 @@ are read from the original bytes, so the agent cannot weaken what judges it.
 | build | `change-scope` | The patch adds or edits files under `src/` and new files under `tests/` only: never `acceptance/`, `.github/`, policy, `request.md`, `docs/` or existing tests; no deletes, renames or mode changes. |
 | build | `money-in-cents` | House standard: money is integer cents, so `src/` has no float literals and no `float()` calls. |
 | build | `implementation-report-format` | Report structure. |
-| documentation | `documentation-links` | Only Markdown under `docs/`; links and anchors resolve; an added or rewritten line links to the changed source it describes. |
+| documentation | `documentation-links` | Only Markdown under `docs/`; links and anchors resolve; an edited page links to the changed source it documents. |
 | documentation | `combined-candidate` | Acceptance and regression rerun on code plus docs. |
 | plan, spec, docs, review | `*-format*` | Document structure and references (every acceptance scenario title is listed). |
 

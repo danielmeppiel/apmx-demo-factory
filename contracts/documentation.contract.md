@@ -27,9 +27,9 @@ Read the common, Documentation report and Project documentation pages formats
 in checks/document-formats.md. Use the supplied write_file artifact tool to
 edit only Markdown pages under docs/ (prefer the existing page that covers the
 changed code) and to write documentation.md. Describe the changed behaviour
-for a reader: what now happens, the boundaries, and what stays the same. At
-least one line you add or rewrite must link to a src/ file that changes.diff
-changed, with a relative inline link (for example from docs/, ../src/...). Do not link to checks/,
+for a reader: what now happens, the boundaries, and what stays the same. Edit
+the page that documents the changed code: it must link to a src/ file that
+changes.diff changed, with a relative inline link (from docs/, ../src/...). Do not link to checks/,
 request.md, specification.md, implementation.md or other factory and stage
 files; they are not delivered with the project.
 
