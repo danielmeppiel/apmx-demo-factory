@@ -269,24 +269,30 @@ def profile(
 
 
 def apply_patch(candidate: Path, raw: bytes, area: Path, name: str) -> None:
-    """Check and apply one profiled patch without ambient Git configuration."""
+    """Apply one profiled patch the way APMX reconstructs it for the receipt.
+
+    Git's default whitespace rules are errors, as in APMX's receipt export. A
+    patch that applies only when whitespace errors are ignored is a rejection
+    (exit 1, retryable); one that does not apply at all is invalid input.
+    """
     exported = area / name
     exported.write_bytes(raw)
     git = shutil.which("git")
     if git is None:
         raise Invalid("Git is missing. Install Git and rerun this check.")
-    command = [
-        git,
-        "-c",
-        "core.longpaths=true",
-        "-c",
-        "core.autocrlf=false",
-        "apply",
-        "--whitespace=nowarn",
-    ]
-    for options in (["--check"], []):
-        result = subprocess.run(
-            [*command, *options, str(exported)],
+
+    def run(*options: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            [
+                git,
+                "-c",
+                "core.longpaths=true",
+                "-c",
+                "core.autocrlf=false",
+                "apply",
+                *options,
+                str(exported),
+            ],
             cwd=candidate,
             env=clean_environment(area),
             stdout=subprocess.DEVNULL,
@@ -294,9 +300,19 @@ def apply_patch(candidate: Path, raw: bytes, area: Path, name: str) -> None:
             timeout=15,
             check=False,
         )
-        if result.returncode:
-            detail = result.stderr.decode("ascii", "backslashreplace")[:300]
+
+    strict = run("--check", "--whitespace=error-all")
+    if strict.returncode:
+        loose = run("--check", "--whitespace=nowarn")
+        detail = strict.stderr.decode("ascii", "backslashreplace")[:300]
+        if loose.returncode:
             raise Invalid(f"Patch does not apply cleanly to the original project: {detail}")
+        raise OutOfScope(
+            [f"the patch has whitespace errors (trailing spaces or blank lines at EOF): {detail}"]
+        )
+    result = run("--whitespace=error-all")
+    if result.returncode:
+        raise Invalid("Patch did not apply after a successful check.")
 
 
 def copy_tree(root: Path, destination: Path, names: tuple[str, ...]) -> None:
@@ -332,23 +348,23 @@ def materialize(root: Path, patch: str, area: Path) -> tuple[Path, dict[str, Any
         "patch": digest(raw),
         "checks": tree_hash(check_inventory(root)),
     }
+    candidate = area / "candidate"
     try:
         edits = profile(root, raw, CODE_ROOTS, require_source=True)
+        candidate.mkdir()
+        copy_tree(root, candidate, base_names)
+        apply_patch(candidate, raw, area, "captured.diff")
     except OutOfScope as exc:
         exc.subject = subject
         raise
-    candidate = area / "candidate"
-    candidate.mkdir()
-    copy_tree(root, candidate, base_names)
-    apply_patch(candidate, raw, area, "captured.diff")
     expected = set(base_names) | {edit["path"] for edit in edits}
     names = tree_names(candidate, APPLICATION_ROOTS, APPLICATION_FILES)
     if set(names) != expected:
         raise Invalid("Patch changed files outside its declared edits.")
     files = inventory(candidate, names)
     subject.update(candidate=tree_hash(files), changed=_changed(base, files))
-    subject["_base_files"] = base
-    subject["_candidate_files"] = files
+    subject["base_files"] = base
+    subject["candidate_files"] = files
     return candidate, subject
 
 
@@ -359,20 +375,20 @@ def materialize_documented(
     candidate, subject = materialize(root, patch, area)
     raw = read_file(root, documentation_patch, MAX_PATCH)
     subject["documentation_patch"] = digest(raw)
-    subject["code_candidate"] = subject["candidate"]
+    code_files = subject["candidate_files"]
     try:
         edits = profile(root, raw, DOCUMENTATION_ROOTS, require_source=False)
+        not_markdown = [edit["path"] for edit in edits if not edit["path"].endswith(".md")]
+        if not_markdown:
+            raise OutOfScope(
+                [f"it changes {name}; documentation pages are Markdown" for name in not_markdown]
+            )
+        apply_patch(candidate, raw, area, "captured-documentation.diff")
     except OutOfScope as exc:
-        exc.subject = {key: value for key, value in subject.items() if not key.startswith("_")}
+        exc.subject = {
+            k: v for k, v in subject.items() if k not in ("base_files", "candidate_files")
+        }
         raise
-    not_markdown = [edit["path"] for edit in edits if not edit["path"].endswith(".md")]
-    if not_markdown:
-        raise OutOfScope(
-            [f"it changes {name}; documentation pages are Markdown" for name in not_markdown],
-            {key: value for key, value in subject.items() if not key.startswith("_")},
-        )
-    code_files = subject["_candidate_files"]
-    apply_patch(candidate, raw, area, "captured-documentation.diff")
     names = tree_names(candidate, APPLICATION_ROOTS, APPLICATION_FILES)
     if set(names) != set(code_files) | {edit["path"] for edit in edits}:
         raise Invalid("Documentation patch changed files outside its declared edits.")
@@ -380,12 +396,15 @@ def materialize_documented(
     for name, entry in code_files.items():
         if not name.startswith(DOCUMENTATION_ROOTS) and files[name] != entry:
             raise Invalid("Documentation changed the accepted code candidate.")
+    edited = {edit["path"] for edit in edits}
     subject.update(
         candidate=tree_hash(files),
-        changed=_changed(subject["_base_files"], files),
-        documentation_edits=sorted(edit["path"] for edit in edits),
+        # APMX reconstructs this: the code candidate minus the pages the docs patch edits.
+        code_candidate=tree_hash({k: v for k, v in code_files.items() if k not in edited}),
+        changed=_changed(subject["base_files"], files),
+        documentation_edits=sorted(edited),
     )
-    subject["_candidate_files"] = files
+    subject["candidate_files"] = files
     return candidate, subject
 
 
@@ -442,7 +461,7 @@ def execute(
     root = Path.cwd().resolve()
     area = root / f".software-factory-check-{uuid.uuid4().hex}"
     evidence: dict[str, Any] = {
-        "schema": "software-factory-check/2",
+        "schema": "software-factory-check/1",
         "check": name,
         "observed": [],
         "subject": None,
@@ -456,15 +475,15 @@ def execute(
             if documentation
             else materialize(root, args.patch, area)
         )
-        evidence["subject"] = {k: v for k, v in subject.items() if not k.startswith("_")}
+        evidence["subject"] = subject
         code, rows = inspect(root, candidate, area, subject)
         evidence["observed"] = rows
         if code not in (0, 1):
             raise Invalid("The check could not complete.")
-        names = tuple(subject["_candidate_files"])
-        if inventory(candidate, names) != subject["_candidate_files"]:
+        names = tuple(subject["candidate_files"])
+        if inventory(candidate, names) != subject["candidate_files"]:
             raise Invalid("Candidate files changed while checks were running.")
-        if inventory(root, tuple(subject["_base_files"])) != subject["_base_files"]:
+        if inventory(root, tuple(subject["base_files"])) != subject["base_files"]:
             raise Invalid("The original project changed while checks were running.")
         if digest(read_file(root, args.patch, MAX_PATCH)) != subject["patch"]:
             raise Invalid("Patch artifact changed while checks were running.")
