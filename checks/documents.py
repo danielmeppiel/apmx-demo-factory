@@ -10,16 +10,17 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from software_factory_cases import REQUIRED
+from software_factory_bdd import feature_files, scenario_ids
 from software_factory_support import (
-    BASE_FILES,
-    CHANGED_FILES,
-    DOCUMENTATION_FILES,
+    SOURCE_ROOT,
+    TESTS_ROOT,
     Invalid,
     digest,
     inventory,
     read_file,
 )
+
+TARGET_ROOTS = ("src/", "tests/", "docs/")
 
 SCHEMA = "software-factory-document/2"
 SECTIONS = {
@@ -128,40 +129,74 @@ def validate_metadata(root: Path, kind: str, data: Any) -> set[str]:
         raise Rejected("Metadata fields, document type or example schema version do not match.")
     references: set[str] = set()
     if kind in ("planning", "specification"):
-        exact_references(data["acceptance"], REQUIRED, "Acceptance IDs")
-        references.add("checks/software_factory_cases.py")
+        exact_references(data["acceptance"], scenario_ids(root), "Acceptance IDs")
+        references.update(path.relative_to(root).as_posix() for path in feature_files(root))
     if kind == "planning":
         targets = data["targets"]
-        if not isinstance(targets, list) or any(
-            not isinstance(item, dict) or set(item) != {"path", "state"} for item in targets
+        if (
+            not isinstance(targets, list)
+            or not 1 <= len(targets) <= 30
+            or any(
+                not isinstance(item, dict)
+                or set(item) != {"path", "state"}
+                or not isinstance(item["path"], str)
+                for item in targets
+            )
         ):
-            raise Rejected("Targets must be objects with path and state.")
-        exact_references(
-            [item["path"] for item in targets], (*CHANGED_FILES, *DOCUMENTATION_FILES), "Targets"
-        )
+            raise Rejected("Targets must be 1 to 30 objects with path and state.")
+        paths = [item["path"] for item in targets]
+        if len(set(paths)) != len(paths):
+            raise Rejected("Each target path must appear once.")
         for item in targets:
+            path = item["path"]
+            if not path.startswith(TARGET_ROOTS) or ".." in path.split("/"):
+                raise Rejected(f"Targets stay under src/, tests/ or docs/: {path}")
             try:
-                read_file(root, item["path"])
+                read_file(root, path)
             except FileNotFoundError:
                 expected = "new"
             else:
                 expected = "existing"
-                references.add(item["path"])
+                references.add(path)
             if item["state"] != expected:
-                raise Rejected(f"Target state must be {expected}: {item['path']}")
+                raise Rejected(f"Target state must be {expected}: {path}")
+            if path.startswith(TESTS_ROOT + "/") and expected == "existing":
+                raise Rejected(f"Existing tests are preserved, not targets: {path}")
+        for prefix, label in (
+            ("src/", "a src/ file"),
+            ("tests/", "a new test file"),
+            ("docs/", "a docs/ page"),
+        ):
+            if not any(path.startswith(prefix) for path in paths):
+                raise Rejected(f"Targets must include {label}.")
     elif kind == "specification":
-        interfaces = []
-        for name in BASE_FILES:
-            if name.startswith("src/"):
-                module = ast.parse(read_file(root, name), filename=name)
-                references.add(name)
-                interfaces.extend(
-                    f"{name}:{node.name}"
-                    for node in module.body
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and not node.name.startswith("_")
-                )
-        exact_references(data["interfaces"], tuple(interfaces), "Public interfaces")
+        interfaces = data["interfaces"]
+        if (
+            not isinstance(interfaces, list)
+            or not 1 <= len(interfaces) <= 30
+            or any(not isinstance(item, str) for item in interfaces)
+            or len(set(interfaces)) != len(interfaces)
+        ):
+            raise Rejected("Interfaces must be 1 to 30 unique path:name strings.")
+        for item in interfaces:
+            path, separator, name = item.partition(":")
+            if not separator or not path.startswith(SOURCE_ROOT + "/") or not path.endswith(".py"):
+                raise Rejected(f"Interface must be src/<module>.py:<name>: {item}")
+            try:
+                module = ast.parse(read_file(root, path), filename=path)
+            except FileNotFoundError as exc:
+                raise Rejected(
+                    f"Interface module does not exist in the captured source: {path}"
+                ) from exc
+            public = {
+                node.name
+                for node in module.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and not node.name.startswith("_")
+            }
+            if name not in public:
+                raise Rejected(f"Interface is not a public function or class in {path}: {name}")
+            references.add(path)
     elif kind == "review":
         findings = data["findings"]
         if not isinstance(findings, list) or len(findings) > 20:

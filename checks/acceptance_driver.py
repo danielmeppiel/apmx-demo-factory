@@ -1,18 +1,23 @@
-"""Launch only the supplied feature, ignoring all external Behave configuration."""
+"""Run the repository's own acceptance/ features against one candidate tree.
+
+argv: ROOT CANDIDATE REPORT. Features and step definitions come from ROOT, the
+original project bytes; only the application under test comes from CANDIDATE.
+External Behave configuration is ignored.
+"""
 
 import sys
 from pathlib import Path
 
-from behave.configuration import Configuration
-from behave.runner import Runner
-
 
 def main() -> int:
-    candidate, report = map(Path, sys.argv[1:])
-    feature = Path(__file__).resolve().parent / "features/free-shipping.feature"
+    root, candidate, report = map(Path, sys.argv[1:4])
+    from behave.configuration import Configuration
+    from behave.runner import Runner
+
+    sys.path[0:0] = [str(candidate / "src"), str(candidate)]
     config = Configuration(
         [
-            str(feature),
+            str(root / "acceptance"),
             "--format",
             "json",
             "--outfile",

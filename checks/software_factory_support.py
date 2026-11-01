@@ -1,7 +1,13 @@
-"""Portable candidate materialization shared by acceptance and regression.
+"""Generic candidate materialization shared by this factory's checks.
 
-This is an example checker, not a scheduler, runtime receipt owner or sandbox.
-It consumes captured files, never imports APMX, and emits observations on stdout.
+The checks run in a fresh copy of the receiving repository's ORIGINAL bytes plus
+the artifact under check. The agent's work arrives only as a Git patch, which is
+profiled, applied to a private copy and judged there. The repository's own
+acceptance specs and existing tests are read from the original bytes, so a
+patch cannot weaken what judges it.
+
+This is an example checker, not a scheduler, receipt owner or sandbox. It never
+imports APMX and emits one JSON observation on stdout.
 """
 
 import argparse
@@ -18,28 +24,32 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-MAX_FILE = 128 * 1024
-BASE_FILES = ("src/__init__.py", "src/pricing.py", "src/checkout.py", "tests/test_checkout.py")
-CHANGED_FILES = ("src/pricing.py", "src/checkout.py", "tests/test_free_shipping.py")
-DOCUMENTATION_FILES = ("docs/checkout.md",)
+MAX_FILE = 256 * 1024
+MAX_PATCH = 128 * 1024
+MAX_FILES = 2000
+# The repository layout this factory works on (see README.md: Repository conventions).
+APPLICATION_ROOTS = ("src", "tests", "docs", "acceptance")
+APPLICATION_FILES = ("README.md",)
+SOURCE_ROOT = "src"
+TESTS_ROOT = "tests"
+ACCEPTANCE_ROOT = "acceptance"
+CODE_ROOTS = ("src/", "tests/")
+DOCUMENTATION_ROOTS = ("docs/",)
 
 
 class Invalid(Exception):
-    """Missing, unsupported or incomplete check input or execution."""
+    """Missing, unsupported or incomplete check input or execution (exit 2)."""
 
 
 class OutOfScope(Exception):
-    """A well-formed patch whose file set differs from the check profile: a rejection.
+    """A well-formed patch that changes what this factory may not change (exit 1).
 
-    ``subject`` names the candidate actually reconstructed from that patch, so a
-    receipt can bind the rejected attempt to real bytes.
+    An assessed rejection, so an authored repair budget can retry it.
     """
 
-    def __init__(
-        self, message: str, paths: tuple[str, ...], subject: dict[str, Any] | None = None
-    ) -> None:
-        super().__init__(message)
-        self.paths = paths
+    def __init__(self, reasons: list[str], subject: dict[str, Any] | None = None) -> None:
+        super().__init__("Patch is out of scope: " + "; ".join(reasons) + ".")
+        self.reasons = reasons
         self.subject = subject
 
 
@@ -66,7 +76,7 @@ def digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def inventory(root: Path, names: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+def inventory(root: Path, names: tuple[str, ...] | list[str]) -> dict[str, dict[str, Any]]:
     result = {}
     for name in sorted(names):
         raw = read_file(root, name)
@@ -78,14 +88,36 @@ def tree_hash(files: dict[str, dict[str, Any]]) -> str:
     return digest(json.dumps(files, sort_keys=True, separators=(",", ":")).encode("ascii"))
 
 
+def tree_names(root: Path, tops: tuple[str, ...], files: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """Regular files under the given top-level directories, refusing symlinks."""
+    names = []
+    for top in tops:
+        base = root / top
+        if base.is_symlink():
+            raise Invalid(f"Symlinked directory is not supported: {top}")
+        if not base.exists():
+            continue
+        for path in sorted(base.rglob("*")):
+            if "__pycache__" in path.parts or path.suffix == ".pyc":
+                continue
+            if path.is_symlink():
+                raise Invalid(f"Symlink input is not supported: {path.relative_to(root)}")
+            if path.is_file():
+                names.append(path.relative_to(root).as_posix())
+            elif not path.is_dir():
+                raise Invalid(f"Unsupported file type: {path.relative_to(root)}")
+    names.extend(name for name in files if (root / name).is_file())
+    if len(names) > MAX_FILES:
+        raise Invalid("The application tree is larger than this example supports.")
+    return tuple(sorted(names))
+
+
+def application_names(root: Path) -> tuple[str, ...]:
+    return tree_names(root, APPLICATION_ROOTS, APPLICATION_FILES)
+
+
 def check_inventory(root: Path) -> dict[str, dict[str, Any]]:
-    if any(path.is_symlink() for path in (root / "checks").rglob("*")):
-        raise Invalid("Supplied check resources must not contain symlinks.")
-    names = tuple(
-        path.relative_to(root).as_posix()
-        for path in sorted((root / "checks").rglob("*"))
-        if path.is_file() and "__pycache__" not in path.parts
-    )
+    names = tree_names(root, ("checks",))
     if not names or len(names) > 32:
         raise Invalid("The supplied check resource inventory is empty or too large.")
     return inventory(root, names)
@@ -110,95 +142,134 @@ def clean_environment(home: Path) -> dict[str, str]:
     return env
 
 
-def patch_paths(
-    raw: bytes,
-    *,
-    changed_files: tuple[str, ...] = CHANGED_FILES,
-    added_files: tuple[str, ...] = ("tests/test_free_shipping.py",),
-) -> tuple[str, ...]:
-    """Accept exactly the regular-file edits named by a trusted check profile.
+EXTENDED_VIOLATIONS = (
+    ("deleted file mode", "deletes"),
+    ("old mode", "changes the file mode of"),
+    ("new mode", "changes the file mode of"),
+    ("similarity index", "renames or copies"),
+    ("dissimilarity index", "renames or copies"),
+    ("rename from", "renames"),
+    ("rename to", "renames"),
+    ("copy from", "copies"),
+    ("copy to", "copies"),
+    ("Binary files", "changes binary content in"),
+    ("GIT binary patch", "changes binary content in"),
+)
 
-    Malformed, unsafe or duplicate patch content is invalid input (exit 2). A
-    well-formed patch that edits a different file set is an assessed rejection
-    (exit 1), so an authored repair budget can retry it.
-    """
+
+def parse_patch(raw: bytes) -> list[dict[str, Any]]:
+    """Parse a Git text patch into file edits; malformed content is invalid input."""
     try:
         text = raw.decode("ascii")
     except UnicodeError as exc:
-        raise Invalid("This example expects an ASCII text patch.") from exc
+        raise OutOfScope(["the patch is not ASCII text"]) from exc
     sections = re.split(r"(?m)^diff --git ", text)
     if sections[0] or len(sections) == 1:
         raise Invalid("Expected a Git patch with at least one file section.")
-    paths: list[str] = []
+    edits: list[dict[str, Any]] = []
     for section in sections[1:]:
         lines = section.splitlines() or [""]
-        header = re.fullmatch(r"a/([a-zA-Z0-9_./-]+) b/\1", lines[0])
-        if (
-            not header
-            or header[1] in paths
-            or any(part in ("", ".", "..") for part in header[1].split("/"))
-        ):
-            raise Invalid("Patch contains an unsafe or duplicate path.")
-        name = header[1]
-        paths.append(name)
+        header = re.fullmatch(r"a/([a-zA-Z0-9_./@+-]+) b/([a-zA-Z0-9_./@+-]+)", lines[0])
+        if not header:
+            raise Invalid("Patch contains an unsupported file header.")
+        name = header[2]
+        if any(part in ("", ".", "..") for part in name.split("/") + header[1].split("/")):
+            raise Invalid("Patch contains an unsafe path.")
+        if any(edit["path"] == name for edit in edits):
+            raise Invalid("Patch changes the same path twice.")
+        edit: dict[str, Any] = {"path": name, "kind": "modify", "violations": []}
+        if header[1] != name:
+            edit["violations"].append("renames or copies")
         position = 1
-        if name in changed_files:
-            addition = name in added_files
-            if addition and lines[position : position + 1] != ["new file mode 100644"]:
-                raise Invalid("The generated regression test must be a new regular file.")
-        else:
-            addition = lines[position : position + 1] == ["new file mode 100644"]
-        before = "--- /dev/null" if addition else f"--- a/{name}"
-        after = f"+++ b/{name}"
-        if addition:
+        while position < len(lines) and not lines[position].startswith("--- "):
+            line = lines[position]
+            if line == "new file mode 100644":
+                edit["kind"] = "add"
+            elif line.startswith("new file mode"):
+                edit["kind"] = "add"
+                edit["violations"].append("adds a non-regular or executable file")
+            elif re.fullmatch(r"index [0-9a-f]+\.\.[0-9a-f]+(?: [0-7]{6})?", line):
+                pass
+            else:
+                for prefix, reason in EXTENDED_VIOLATIONS:
+                    if line.startswith(prefix):
+                        edit["violations"].append(reason)
+                        if prefix == "deleted file mode":
+                            edit["kind"] = "delete"
+                        break
+                else:
+                    raise Invalid("Patch contains an unsupported extended header.")
             position += 1
-        if re.fullmatch(r"index [0-9a-f]+\.\.[0-9a-f]+(?: 100644)?", lines[position]):
-            position += 1
-        if lines[position : position + 2] != [before, after]:
-            raise Invalid("Patch headers do not describe the declared regular-file edits.")
-        position += 2
-        if position == len(lines):
-            raise Invalid("Patch has no text change hunks.")
-        while position < len(lines):
-            hunk = re.fullmatch(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@.*", lines[position])
-            if not hunk:
-                raise Invalid("Patch contains unsupported text outside a change hunk.")
-            old, new = (int(count) if count is not None else 1 for count in hunk.groups())
-            position += 1
-            while old or new:
-                if position >= len(lines) or not lines[position]:
-                    raise Invalid("Incomplete patch hunk.")
-                prefix = lines[position][0]
-                if prefix not in (" ", "+", "-"):
-                    raise Invalid("Unsupported patch hunk content.")
-                old -= int(prefix in (" ", "-"))
-                new -= int(prefix in (" ", "+"))
-                if min(old, new) < 0:
-                    raise Invalid("Patch hunk lengths do not match its content.")
+        if position < len(lines):
+            before = "--- /dev/null" if edit["kind"] == "add" else f"--- a/{header[1]}"
+            after = "+++ /dev/null" if edit["kind"] == "delete" else f"+++ b/{name}"
+            if lines[position : position + 2] != [before, after]:
+                raise Invalid("Patch headers do not describe the declared file edit.")
+            position += 2
+            if position == len(lines):
+                raise Invalid("Patch has no text change hunks.")
+            while position < len(lines):
+                hunk = re.fullmatch(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@.*", lines[position])
+                if not hunk:
+                    raise Invalid("Patch contains unsupported text outside a change hunk.")
+                old, new = (int(count) if count is not None else 1 for count in hunk.groups())
                 position += 1
-                if position < len(lines) and lines[position] == r"\ No newline at end of file":
+                while old or new:
+                    if position >= len(lines) or not lines[position]:
+                        raise Invalid("Incomplete patch hunk.")
+                    prefix = lines[position][0]
+                    if prefix not in (" ", "+", "-"):
+                        raise Invalid("Unsupported patch hunk content.")
+                    old -= int(prefix in (" ", "-"))
+                    new -= int(prefix in (" ", "+"))
+                    if min(old, new) < 0:
+                        raise Invalid("Patch hunk lengths do not match its content.")
                     position += 1
-    unexpected = [name for name in paths if name not in changed_files]
-    missing = [name for name in changed_files if name not in paths]
-    if unexpected or missing:
-        reasons = []
-        if unexpected:
-            reasons.append("it also changes " + ", ".join(unexpected))
-        if missing:
-            reasons.append("it does not change " + ", ".join(missing))
-        raise OutOfScope(
-            "Patch is outside this check profile: "
-            + "; ".join(reasons)
-            + ". Change exactly "
-            + ", ".join(changed_files)
-            + ".",
-            tuple(paths),
-        )
-    return tuple(paths)
+                    if position < len(lines) and lines[position] == r"\ No newline at end of file":
+                        position += 1
+        elif not edit["violations"]:
+            raise Invalid("Patch section has no change.")
+        edits.append(edit)
+    return edits
+
+
+def describe(path: str) -> str:
+    if path.startswith(ACCEPTANCE_ROOT + "/"):
+        return f"{path} (acceptance/ belongs to the repository)"
+    if path.startswith(".github/"):
+        return f"{path} (CI workflows are not the factory's to change)"
+    return path
+
+
+def profile(
+    root: Path, raw: bytes, roots: tuple[str, ...], *, require_source: bool
+) -> list[dict[str, Any]]:
+    """Accept only additions/edits of regular files under ``roots``; never existing tests.
+
+    This is the factory's scope rule, shared by every patch-applying check.
+    """
+    edits = parse_patch(raw)
+    reasons = []
+    existing_tests = {
+        name.lower() for name in tree_names(root, (TESTS_ROOT,)) if name.endswith(".py")
+    }
+    for edit in edits:
+        path = edit["path"]
+        for reason in edit["violations"]:
+            reasons.append(f"it {reason} {describe(path)}")
+        if not path.startswith(roots):
+            reasons.append(f"it changes {describe(path)}, outside {', '.join(roots)}")
+        elif path.lower() in existing_tests and edit["kind"] != "add":
+            reasons.append(f"it changes the existing test {path}; add new test files instead")
+    if require_source and not any(edit["path"].startswith(SOURCE_ROOT + "/") for edit in edits):
+        reasons.append("it does not change any file under src/")
+    if reasons:
+        raise OutOfScope(reasons)
+    return edits
 
 
 def apply_patch(candidate: Path, raw: bytes, area: Path, name: str) -> None:
-    """Check and apply one already-profiled captured patch without ambient Git config."""
+    """Check and apply one profiled patch without ambient Git configuration."""
     exported = area / name
     exported.write_bytes(raw)
     git = shutil.which("git")
@@ -210,10 +281,8 @@ def apply_patch(candidate: Path, raw: bytes, area: Path, name: str) -> None:
         "core.longpaths=true",
         "-c",
         "core.autocrlf=false",
-        "-c",
-        "core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol",
         "apply",
-        "--whitespace=error-all",
+        "--whitespace=nowarn",
     ]
     for options in (["--check"], []):
         result = subprocess.run(
@@ -221,121 +290,109 @@ def apply_patch(candidate: Path, raw: bytes, area: Path, name: str) -> None:
             cwd=candidate,
             env=clean_environment(area),
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             timeout=15,
             check=False,
         )
         if result.returncode:
-            raise Invalid("Patch does not apply cleanly to the supplied baseline.")
+            detail = result.stderr.decode("ascii", "backslashreplace")[:300]
+            raise Invalid(f"Patch does not apply cleanly to the original project: {detail}")
 
 
-def _scope(raw: bytes, **profile: tuple[str, ...]) -> OutOfScope | None:
-    try:
-        patch_paths(raw, **profile)
-    except OutOfScope as exc:
-        return exc
-    return None
-
-
-def _touched_existing(root: Path, scope: OutOfScope, known: set[str]) -> tuple[str, ...]:
-    """Out-of-profile files the patch edits in place; they join the reported baseline."""
-    return tuple(name for name in scope.paths if name not in known and (root / Path(name)).exists())
-
-
-def _tree_names(candidate: Path) -> set[str]:
-    return {
-        path.relative_to(candidate).as_posix()
-        for path in candidate.rglob("*")
-        if not path.is_dir() or path.is_symlink()
-    }
-
-
-def _write_base(root: Path, candidate: Path, names: tuple[str, ...]) -> None:
+def copy_tree(root: Path, destination: Path, names: tuple[str, ...]) -> None:
     for name in names:
-        path = candidate / name
+        path = destination / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(read_file(root, name))
 
 
+def original_tree(root: Path, area: Path, label: str = "original") -> Path:
+    """A private copy of the repository's original application bytes."""
+    destination = area / label
+    destination.mkdir()
+    copy_tree(root, destination, application_names(root))
+    return destination
+
+
+def _changed(base: dict[str, Any], files: dict[str, Any]) -> dict[str, Any]:
+    return {
+        name: {"before": base.get(name, {}).get("sha256"), "after": files[name]["sha256"]}
+        for name in sorted(files)
+        if base.get(name) != files[name]
+    }
+
+
 def materialize(root: Path, patch: str, area: Path) -> tuple[Path, dict[str, Any]]:
-    """Apply these exact patch bytes to matching supplied baseline files."""
-    raw = read_file(root, patch)
-    scope = _scope(raw)
-    base_names = BASE_FILES
-    if scope is not None:
-        base_names = (*BASE_FILES, *_touched_existing(root, scope, set(BASE_FILES)))
+    """Apply the code patch to a private copy of the original application."""
+    raw = read_file(root, patch, MAX_PATCH)
+    base_names = application_names(root)
     base = inventory(root, base_names)
-    checks = check_inventory(root)
-    candidate = area / "candidate"
-    candidate.mkdir()
-    _write_base(root, candidate, base_names)
-    apply_patch(candidate, raw, area, "captured.diff")
-    if scope is None:
-        names = tuple(sorted(set(BASE_FILES) | set(CHANGED_FILES)))
-        if _tree_names(candidate) != set(names):
-            raise Invalid("Patch changed files outside the candidate application.")
-    else:
-        names = tuple(sorted(_tree_names(candidate)))
-    files = inventory(candidate, names)
-    subject = {
+    subject: dict[str, Any] = {
         "base": tree_hash(base),
         "patch": digest(raw),
-        "candidate": tree_hash(files),
-        "checks": tree_hash(checks),
-        "base_files": base,
-        "candidate_files": files,
+        "checks": tree_hash(check_inventory(root)),
     }
-    if scope is not None:
-        raise OutOfScope(str(scope), scope.paths, subject)
-    for name in names:
-        read_file(candidate, name).decode("ascii")
+    try:
+        edits = profile(root, raw, CODE_ROOTS, require_source=True)
+    except OutOfScope as exc:
+        exc.subject = subject
+        raise
+    candidate = area / "candidate"
+    candidate.mkdir()
+    copy_tree(root, candidate, base_names)
+    apply_patch(candidate, raw, area, "captured.diff")
+    expected = set(base_names) | {edit["path"] for edit in edits}
+    names = tree_names(candidate, APPLICATION_ROOTS, APPLICATION_FILES)
+    if set(names) != expected:
+        raise Invalid("Patch changed files outside its declared edits.")
+    files = inventory(candidate, names)
+    subject.update(candidate=tree_hash(files), changed=_changed(base, files))
+    subject["_base_files"] = base
+    subject["_candidate_files"] = files
     return candidate, subject
 
 
 def materialize_documented(
     root: Path, patch: str, documentation_patch: str, area: Path
 ) -> tuple[Path, dict[str, Any]]:
-    """Compose docs after code, retaining the accepted code-only tree identity."""
+    """Apply the accepted code patch, then the documentation patch (docs/ only)."""
     candidate, subject = materialize(root, patch, area)
-    raw = read_file(root, documentation_patch)
-    scope = _scope(raw, changed_files=DOCUMENTATION_FILES, added_files=())
-    accepted = set(subject["candidate_files"])
-    doc_names = DOCUMENTATION_FILES
-    if scope is not None:
-        if accepted & set(scope.paths):
-            # The accepted code candidate is a fixed input of this stage, not a scope choice.
-            raise Invalid("Documentation changed the accepted application candidate.")
-        doc_names = _touched_existing(root, scope, accepted)
-    base = {**subject["base_files"], **inventory(root, doc_names)}
-    _write_base(root, candidate, doc_names)
+    raw = read_file(root, documentation_patch, MAX_PATCH)
+    subject["documentation_patch"] = digest(raw)
+    subject["code_candidate"] = subject["candidate"]
+    try:
+        edits = profile(root, raw, DOCUMENTATION_ROOTS, require_source=False)
+    except OutOfScope as exc:
+        exc.subject = {key: value for key, value in subject.items() if not key.startswith("_")}
+        raise
+    not_markdown = [edit["path"] for edit in edits if not edit["path"].endswith(".md")]
+    if not_markdown:
+        raise OutOfScope(
+            [f"it changes {name}; documentation pages are Markdown" for name in not_markdown],
+            {key: value for key, value in subject.items() if not key.startswith("_")},
+        )
+    code_files = subject["_candidate_files"]
     apply_patch(candidate, raw, area, "captured-documentation.diff")
-    if inventory(candidate, tuple(subject["candidate_files"])) != subject["candidate_files"]:
-        raise Invalid("Documentation changed the accepted application candidate.")
-    if scope is None:
-        names = (*subject["candidate_files"], *DOCUMENTATION_FILES)
-        if _tree_names(candidate) != set(names):
-            raise Invalid("Documentation changed files outside the combined candidate.")
-    else:
-        names = tuple(sorted(_tree_names(candidate)))
+    names = tree_names(candidate, APPLICATION_ROOTS, APPLICATION_FILES)
+    if set(names) != set(code_files) | {edit["path"] for edit in edits}:
+        raise Invalid("Documentation patch changed files outside its declared edits.")
     files = inventory(candidate, names)
-    combined = {
-        **subject,
-        "base": tree_hash(base),
-        "code_candidate": subject["candidate"],
-        "documentation_patch": digest(raw),
-        "candidate": tree_hash(files),
-        "base_files": base,
-        "candidate_files": files,
-    }
-    if scope is not None:
-        raise OutOfScope(str(scope), scope.paths, combined)
-    return candidate, combined
+    for name, entry in code_files.items():
+        if not name.startswith(DOCUMENTATION_ROOTS) and files[name] != entry:
+            raise Invalid("Documentation changed the accepted code candidate.")
+    subject.update(
+        candidate=tree_hash(files),
+        changed=_changed(subject["_base_files"], files),
+        documentation_edits=sorted(edit["path"] for edit in edits),
+    )
+    subject["_candidate_files"] = files
+    return candidate, subject
 
 
 def run_driver(
-    root: Path, candidate: Path, area: Path, script: str, *arguments: str
+    root: Path, tree: Path, area: Path, script: str, *arguments: str, timeout: int = 60
 ) -> tuple[int, Any]:
-    """Run trusted code with bounded time and a bounded structured report."""
+    """Run trusted check code in a fresh interpreter with a bounded JSON report."""
     report = area / f"result-{uuid.uuid4().hex}.json"
     result = subprocess.run(
         [
@@ -343,7 +400,8 @@ def run_driver(
             "-I",
             "-B",
             str(root / "checks" / script),
-            str(candidate),
+            str(root),
+            str(tree),
             str(report),
             *arguments,
         ],
@@ -351,48 +409,41 @@ def run_driver(
         env=clean_environment(area),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        timeout=45,
+        timeout=timeout,
         check=False,
     )
-    raw = read_file(area, report.name)
+    try:
+        raw = read_file(area, report.name, 4 * 1024 * 1024)
+    except FileNotFoundError as exc:
+        raise Invalid(f"{script} did not write its report (exit {result.returncode}).") from exc
     try:
         return result.returncode, json.loads(raw)
     except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise Invalid("The check report is not valid bounded JSON.") from exc
 
 
-def rows_status(rows: list[dict[str, Any]], required: tuple[str, ...]) -> int:
-    """Require every expected row once; incomplete execution never passes."""
-    if not isinstance(rows, list) or len(rows) != len(required):
-        raise Invalid("Missing or extra required scenario rows.")
-    if any(not isinstance(row, dict) for row in rows):
-        raise Invalid("Invalid scenario row report.")
-    if sorted(row.get("id", "") for row in rows) != sorted(required):
-        raise Invalid("Required scenario identities do not match the observed report.")
-    if any(row.get("status") not in ("passed", "failed") for row in rows):
-        raise Invalid("A required scenario was skipped, undefined, pending or unexecuted.")
-    return int(any(row["status"] == "failed" for row in rows))
+def import_roots(tree: Path) -> list[str]:
+    """The repository convention: src/ is the import root (the tree root as fallback)."""
+    return [str(tree / SOURCE_ROOT), str(tree)]
 
 
 def execute(
     name: str,
-    required: tuple[str, ...],
-    inspect: Callable[[Path, Path, Path], tuple[int, list[dict[str, Any]]]],
+    inspect: Callable[[Path, Path, Path, dict[str, Any]], tuple[int, list[dict[str, Any]]]],
     argv: list[str] | None = None,
     *,
     documentation: bool = False,
 ) -> int:
     parser = argparse.ArgumentParser(description=f"Apply a captured patch and run {name}.")
-    parser.add_argument("patch", help="Relative patch artifact, normally changes.diff")
+    parser.add_argument("patch", help="Relative code patch artifact, normally changes.diff")
     if documentation:
         parser.add_argument("documentation_patch", help="Docs-only patch, applied after code")
     args = parser.parse_args(argv)
     root = Path.cwd().resolve()
     area = root / f".software-factory-check-{uuid.uuid4().hex}"
     evidence: dict[str, Any] = {
-        "schema": "software-factory-check/1",
+        "schema": "software-factory-check/2",
         "check": name,
-        "required": list(required),
         "observed": [],
         "subject": None,
         "status": "error",
@@ -405,24 +456,21 @@ def execute(
             if documentation
             else materialize(root, args.patch, area)
         )
-        evidence["subject"] = subject
-        code, rows = inspect(root, candidate, area)
+        evidence["subject"] = {k: v for k, v in subject.items() if not k.startswith("_")}
+        code, rows = inspect(root, candidate, area, subject)
         evidence["observed"] = rows
-        if code not in (0, 1, 2):
-            raise Invalid("Unexpected check exit status.")
-        if code == 2:
-            raise Invalid("The check could not complete every required test.")
-        if (
-            tree_hash(inventory(candidate, tuple(subject["candidate_files"])))
-            != subject["candidate"]
-        ):
+        if code not in (0, 1):
+            raise Invalid("The check could not complete.")
+        names = tuple(subject["_candidate_files"])
+        if inventory(candidate, names) != subject["_candidate_files"]:
             raise Invalid("Candidate files changed while checks were running.")
-        if inventory(root, tuple(subject["base_files"])) != subject["base_files"]:
-            raise Invalid("Supplied baseline changed while checks were running.")
-        if digest(read_file(root, args.patch)) != subject["patch"]:
+        if inventory(root, tuple(subject["_base_files"])) != subject["_base_files"]:
+            raise Invalid("The original project changed while checks were running.")
+        if digest(read_file(root, args.patch, MAX_PATCH)) != subject["patch"]:
             raise Invalid("Patch artifact changed while checks were running.")
         if documentation and (
-            digest(read_file(root, args.documentation_patch)) != subject["documentation_patch"]
+            digest(read_file(root, args.documentation_patch, MAX_PATCH))
+            != subject["documentation_patch"]
         ):
             raise Invalid("Documentation patch changed while checks were running.")
         if tree_hash(check_inventory(root)) != subject["checks"]:
@@ -432,7 +480,7 @@ def execute(
         code = 1
         evidence["status"] = "failed"
         evidence["subject"] = exc.subject
-        evidence["detail"] = str(exc).encode("ascii", "backslashreplace").decode("ascii")[:600]
+        evidence["detail"] = str(exc).encode("ascii", "backslashreplace").decode("ascii")[:900]
     except (
         Invalid,
         OSError,
@@ -444,7 +492,7 @@ def execute(
     ) as exc:
         code = 2
         evidence["status"] = "error"
-        evidence["detail"] = str(exc).encode("ascii", "backslashreplace").decode("ascii")[:600]
+        evidence["detail"] = str(exc).encode("ascii", "backslashreplace").decode("ascii")[:900]
     finally:
         if area.exists():
             try:

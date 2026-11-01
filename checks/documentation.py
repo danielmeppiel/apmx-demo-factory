@@ -1,6 +1,11 @@
-"""Check the combined candidate's document structure, local links and declared examples."""
+"""Check the documentation patch: Markdown pages under docs/, valid links, changed behaviour named.
 
-import json
+The pages it edits must keep valid inline local links and H2 anchors, and its
+new text must link to at least one src/ file that the code patch changed, so
+the documentation describes the change rather than restating the old page.
+"""
+
+import collections
 import posixpath
 import re
 import sys
@@ -10,32 +15,30 @@ from urllib.parse import unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from documents import Rejected, markdown_sections, require_sections
-from regression import validate_suite
-from software_factory_cases import CASES
-from software_factory_support import DOCUMENTATION_FILES, Invalid, execute, read_file, run_driver
+from documents import Rejected, markdown_sections
+from software_factory_support import SOURCE_ROOT, Invalid, execute, read_file
 
-REQUIRED = ("document-structure-links-examples",)
+LINK = r"!?\[[^\]\n]*\]\(([^()\n]*)\)"
 
 
-def validate_links(candidate: Path, name: str, text: str) -> None:
-    """Resolve inline local file links and H2 fragments; never fetch external URLs."""
+def local_links(candidate: Path, name: str, text: str) -> list[str]:
+    """Resolve inline local links and H2 fragments; external URLs are not fetched."""
     if re.search(r"(?m)^ {0,3}\[[^\]\n]+\]:|!?\[[^\]\n]+\]\[[^\]\n]*\]", text):
-        raise Rejected("Reference-style links are outside this example's inline-link format.")
-    pattern = r"!?\[[^\]\n]*\]\(([^()\n]*)\)"
-    if re.search(r"!?\[[^\]\n]*\]\(", re.sub(pattern, "", text)):
-        raise Rejected("Malformed or unsupported inline documentation link.")
-    for target in re.findall(pattern, text):
+        raise Rejected(f"{name}: reference-style links are outside this factory's link format.")
+    if re.search(r"!?\[[^\]\n]*\]\(", re.sub(LINK, "", text)):
+        raise Rejected(f"{name}: malformed or unsupported inline link.")
+    resolved = []
+    for target in re.findall(LINK, text):
         if not target or any(character.isspace() for character in target):
-            raise Rejected("Inline link targets must be nonempty URLs without literal spaces.")
+            raise Rejected(f"{name}: link targets must be nonempty URLs without spaces.")
         try:
             parsed = urlsplit(target)
         except ValueError as exc:
-            raise Rejected("Malformed documentation link.") from exc
+            raise Rejected(f"{name}: malformed link {target}") from exc
         if parsed.scheme in ("http", "https") and parsed.netloc:
             continue
         if parsed.scheme or parsed.netloc or parsed.query:
-            raise Rejected("Expected an inline local link or an absolute HTTP(S) link.")
+            raise Rejected(f"{name}: expected a relative local link or an absolute HTTP(S) link.")
         path = (
             posixpath.normpath(posixpath.join(posixpath.dirname(name), unquote(parsed.path)))
             if parsed.path
@@ -43,66 +46,72 @@ def validate_links(candidate: Path, name: str, text: str) -> None:
         )
         try:
             raw = read_file(candidate, path)
-        except (Invalid, FileNotFoundError, IsADirectoryError) as exc:
-            raise Rejected(f"Local documentation link is not a captured file: {target}") from exc
+        except (Invalid, FileNotFoundError, IsADirectoryError, NotADirectoryError) as exc:
+            raise Rejected(f"{name}: local link target does not exist: {target}") from exc
         if parsed.fragment:
-            sections, _ = markdown_sections(raw.decode("ascii"))
+            sections, _ = markdown_sections(raw.decode("utf-8", "replace"))
             anchors = {
                 re.sub(r"[^a-z0-9 _-]", "", heading.lower()).replace(" ", "-")
                 for heading in sections
             }
             if unquote(parsed.fragment) not in anchors:
-                raise Rejected(f"Local documentation H2 anchor does not exist: {target}")
+                raise Rejected(f"{name}: H2 anchor does not exist: {target}")
+        resolved.append(path)
+    return resolved
 
 
-def validate_examples(section: str) -> None:
-    lines = [line.strip() for line in section.splitlines() if line.lstrip().startswith("|")]
-    table = [tuple(part.strip() for part in line.strip("|").split("|")) for line in lines]
-    if (
-        len(table) != len(CASES) + 2
-        or table[0] != ("Case", "Subtotal", "Delivery", "Total", "Error")
-        or len(table[1]) != 5
-        or any(re.fullmatch(r":?-{3,}:?", cell) is None for cell in table[1])
-    ):
-        raise Rejected("Expected the complete five-column checkout example table.")
-    observed = {}
-    for row in table[2:]:
-        if len(row) != 5 or row[0] in observed:
-            raise Rejected("Documentation example rows must have five cells and unique case IDs.")
-        name, subtotal, fee, total, error = row
+def original_link_paths(name: str, text: str) -> list[str]:
+    paths = []
+    for target in re.findall(LINK, text):
         try:
-            if error == "-":
-                case = (name, json.loads(subtotal), json.loads(fee), json.loads(total))
-            elif fee == total == "-":
-                case = (name, json.loads(subtotal), error, None)
-            else:
-                raise Rejected("An error example cannot also claim delivery and total values.")
-        except (json.JSONDecodeError, RecursionError) as exc:
-            raise Rejected("Example inputs and numeric results must use JSON literals.") from exc
-        observed[name] = case
-    expected = {case[0]: case for case in CASES}
-    if json.dumps(observed, sort_keys=True) != json.dumps(expected, sort_keys=True):
-        raise Rejected("Documented inputs/results must match every supplied checkout case exactly.")
+            parsed = urlsplit(target)
+        except ValueError:
+            continue
+        if parsed.path and not parsed.scheme and not parsed.netloc:
+            paths.append(
+                posixpath.normpath(posixpath.join(posixpath.dirname(name), unquote(parsed.path)))
+            )
+    return paths
 
 
-def inspect(root: Path, candidate: Path, area: Path) -> tuple[int, list[dict[str, Any]]]:
-    try:
-        for name in DOCUMENTATION_FILES:
+def inspect(
+    root: Path, candidate: Path, area: Path, subject: dict[str, Any]
+) -> tuple[int, list[dict[str, Any]]]:
+    pages = subject["documentation_edits"]
+    changed_source = {name for name in subject["changed"] if name.startswith(SOURCE_ROOT + "/")}
+    rows = []
+    new_targets: collections.Counter[str] = collections.Counter()
+    for name in pages:
+        try:
             text = read_file(candidate, name, 16 * 1024).decode("ascii")
             sections, _ = markdown_sections(text)
-            require_sections(sections, ("Delivery policy", "Examples", "Input errors"))
-            validate_links(candidate, name, text)
-            validate_examples(sections["Examples"])
-    except (Rejected, UnicodeError) as exc:
-        return 1, [{"id": REQUIRED[0], "status": "failed", "detail": str(exc)[:600]}]
-    returncode, report = run_driver(
-        root, candidate, area, "software_factory_regression_driver.py", "original"
+            if not sections:
+                raise Rejected(f"{name}: a documentation page needs H2 sections.")
+            after = collections.Counter(local_links(candidate, name, text))
+            before = collections.Counter(
+                original_link_paths(name, read_file(root, name).decode("utf-8", "replace"))
+                if (root / name).is_file()
+                else []
+            )
+            new_targets.update(after - before)
+            rows.append({"id": name, "status": "passed"})
+        except (Rejected, UnicodeError) as exc:
+            rows.append({"id": name, "status": "failed", "detail": str(exc)[:600]})
+    described = sorted(changed_source & set(new_targets))
+    rows.append(
+        {
+            "id": "describes-changed-source",
+            "status": "passed" if described else "failed",
+            "detail": (
+                "new links to changed source: " + ", ".join(described)
+                if described
+                else "the new documentation text links to none of the changed src/ files: "
+                + ", ".join(sorted(changed_source))
+            ),
+        }
     )
-    code, rows = validate_suite(report, "original", returncode)
-    return code, [
-        {"id": REQUIRED[0], "status": "passed" if code == 0 else "failed", "observed": rows}
-    ]
+    return int(any(row["status"] != "passed" for row in rows)), rows
 
 
 if __name__ == "__main__":
-    raise SystemExit(execute("documentation", REQUIRED, inspect, documentation=True))
+    raise SystemExit(execute("documentation", inspect, documentation=True))

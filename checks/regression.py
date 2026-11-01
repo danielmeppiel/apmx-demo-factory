@@ -1,4 +1,10 @@
-"""Apply changes.diff and run fixed cases plus existing and generated tests."""
+"""Apply changes.diff; the repository's whole unittest suite must pass, plus new tests.
+
+The existing tests come from the original project (the scope rule forbids
+editing them). Their identities are observed on the original tree first, so
+every one of them must still run and pass on the candidate, and the change must
+add at least one new test of its own.
+"""
 
 import sys
 from pathlib import Path
@@ -6,71 +12,51 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from software_factory_cases import REQUIRED
-from software_factory_support import Invalid, execute, rows_status, run_driver
-
-EXISTING = {
-    "test_checkout.CheckoutTests.test_small_order",
-    "test_checkout.CheckoutTests.test_zero",
-    "test_checkout.CheckoutTests.test_negative",
-    "test_checkout.CheckoutTests.test_invalid_types",
-}
+from software_factory_support import Invalid, execute, original_tree, run_driver
 
 
-def validate_suite(report: Any, suite: str, returncode: int) -> tuple[int, list[dict[str, Any]]]:
-    if not isinstance(report, dict) or report.get("suite") != suite:
-        raise Invalid("Missing or misattributed regression suite report.")
-    tests = report.get("tests")
+def suite(root: Path, tree: Path, area: Path) -> tuple[int, dict[str, str]]:
+    returncode, report = run_driver(root, tree, area, "regression_driver.py")
+    tests = report.get("tests") if isinstance(report, dict) else None
     if (
         not isinstance(tests, list)
-        or not 1 <= len(tests) <= 200
+        or len(tests) > 5000
         or any(
-            not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]
+            not isinstance(row, dict)
+            or not isinstance(row.get("id"), str)
+            or row.get("status") not in ("passed", "failed", "incomplete")
             for row in tests
         )
     ):
-        raise Invalid("Regression tests are missing, empty or malformed.")
-    counters = ("tests_run", "errors", "skipped", "expected_failures", "unexpected_successes")
-    if any(type(report.get(key)) is not int or report[key] < 0 for key in counters):
-        raise Invalid("Regression result counters are missing or invalid.")
-    identifiers = [row["id"] for row in tests]
-    if len(set(identifiers)) != len(identifiers) or report["tests_run"] != len(tests):
-        raise Invalid("Regression test identities or execution counts are incomplete.")
-    rows = report.get("acceptance")
-    if suite == "original":
-        if set(identifiers) != EXISTING:
-            raise Invalid("Original regression test identities are incomplete.")
-        code = rows_status(rows, REQUIRED)
-    else:
-        if rows != [] or not all(
-            identifier.startswith("test_free_shipping.") for identifier in identifiers
-        ):
-            raise Invalid("Generated tests cannot supply original regression evidence.")
-        code = 0
-    if any(
-        report.get(key) != 0
-        for key in ("errors", "skipped", "expected_failures", "unexpected_successes")
-    ):
-        raise Invalid("Regression tests were errored, skipped, pending or incomplete.")
-    test_code = rows_status(tests, tuple(identifiers))
-    code = max(code, test_code)
-    if returncode != code:
-        raise Invalid("Regression process and complete report disagree.")
-    return code, [*rows, *tests]
+        raise Invalid("Malformed unittest report.")
+    rows = {row["id"]: row["status"] for row in tests}
+    if len(rows) != len(tests) or returncode not in (0, 1):
+        raise Invalid("Unittest report identities or exit status are incomplete.")
+    if (returncode == 0) != (bool(rows) and all(s == "passed" for s in rows.values())):
+        raise Invalid("Unittest process and complete report disagree.")
+    return returncode, rows
 
 
-def inspect(root: Path, candidate: Path, area: Path) -> tuple[int, list[dict[str, Any]]]:
-    code = 0
-    rows = []
-    for suite in ("original", "generated"):
-        returncode, report = run_driver(
-            root, candidate, area, "software_factory_regression_driver.py", suite
+def inspect(
+    root: Path, candidate: Path, area: Path, subject: dict[str, Any]
+) -> tuple[int, list[dict[str, Any]]]:
+    code, original = suite(root, original_tree(root, area), area)
+    if code or not original:
+        raise Invalid("The repository's own tests do not pass on the original project.")
+    _, observed = suite(root, candidate, area)
+    rows: list[dict[str, Any]] = []
+    for identifier in sorted(original):
+        rows.append({"id": identifier, "status": observed.get(identifier, "missing")})
+    added = sorted(set(observed) - set(original))
+    rows.extend(
+        {"id": identifier, "status": observed[identifier], "new": True} for identifier in added
+    )
+    if not added:
+        rows.append(
+            {"id": "new-tests", "status": "failed", "detail": "the change adds no new tests"}
         )
-        observed_code, observed_rows = validate_suite(report, suite, returncode)
-        code = max(code, observed_code)
-        rows.extend(observed_rows)
-    return code, rows
+    return int(any(row["status"] != "passed" for row in rows)), rows
 
 
 if __name__ == "__main__":
-    raise SystemExit(execute("regression", REQUIRED, inspect))
+    raise SystemExit(execute("regression", inspect))

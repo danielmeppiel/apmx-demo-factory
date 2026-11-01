@@ -1,8 +1,8 @@
-# Checkout factory document formats
+# Feature factory document formats
 
-These formats belong to this example, not to APMX generally. They check
+These formats belong to this factory, not to APMX generally. They check
 structure and reference consistency, not whether every sentence is true.
-The request and supplied behavioral cases remain authoritative.
+`request.md` and the repository's `acceptance/` scenarios remain authoritative.
 
 ## Common report shape
 
@@ -14,27 +14,31 @@ keys, duplicate JSON keys or additional JSON fences.
 
 Read only the stage-specific format below. Prose wording is not prescribed.
 
+## Acceptance IDs
+
+The acceptance IDs are the titles of every `Scenario` and `Scenario Outline`
+in the repository's `acceptance/*.feature` files, exactly as written after the
+keyword (an outline counts once, whatever its number of example rows). List
+each one exactly once, in any order. The checker reads them from the captured
+feature files.
+
 ## Planning
 
-Use this metadata shape. `acceptance` must contain every `REQUIRED` ID from
-`checks/software_factory_cases.py` exactly once; the list below shows the
-current supplied inventory. `targets` distinguish captured existing files from
-the proposed new regression test.
+`targets` names every file the change will add or edit, each once, with
+`state` `existing` (present in the captured project) or `new`. Targets stay
+under `src/`, `tests/` or `docs/`; they include at least one `src/` file, at
+least one new `tests/` file and at least one `docs/` page. Existing tests are
+preserved, so they are never targets.
 
 ```json
 {
   "schema": "software-factory-document/2",
   "document": "planning",
-  "acceptance": [
-    "below", "Free delivery at 5000 cents", "above", "zero", "large",
-    "negative", "negative-large", "true", "false", "float", "string",
-    "null", "list", "object"
-  ],
+  "acceptance": ["<every scenario title>"],
   "targets": [
-    {"path": "src/pricing.py", "state": "existing"},
-    {"path": "src/checkout.py", "state": "existing"},
-    {"path": "tests/test_free_shipping.py", "state": "new"},
-    {"path": "docs/checkout.md", "state": "existing"}
+    {"path": "src/<package>/<module>.py", "state": "existing"},
+    {"path": "tests/test_<feature>.py", "state": "new"},
+    {"path": "docs/<page>.md", "state": "existing"}
   ]
 }
 ```
@@ -43,20 +47,17 @@ Required H2 sections: Goal, Changes, Validation, Risks.
 
 ## Specification
 
-Use the same complete acceptance list as Planning. Resolve public function
-references against captured source; the checker inspects syntax without
-importing the application.
+Use the same complete acceptance list as Planning. `interfaces` lists the
+existing public functions and classes the change touches, as
+`src/<path>.py:<name>`; each must be a top-level, non-underscore `def` or
+`class` in the captured source (the checker parses it without importing it).
 
 ```json
 {
   "schema": "software-factory-document/2",
   "document": "specification",
-  "acceptance": [
-    "below", "Free delivery at 5000 cents", "above", "zero", "large",
-    "negative", "negative-large", "true", "false", "float", "string",
-    "null", "list", "object"
-  ],
-  "interfaces": ["src/pricing.py:delivery_fee", "src/checkout.py:checkout"]
+  "acceptance": ["<every scenario title>"],
+  "interfaces": ["src/<package>/<module>.py:<function_or_class>"]
 }
 ```
 
@@ -94,30 +95,18 @@ in that artifact, not a line in a reconstructed source file. `detail` is
 nonempty and at most 800 characters. At most 20 findings are accepted.
 Findings and prose are advice, never an acceptance verdict.
 
-## Project page
+## Project documentation pages
 
-The real `docs/checkout.md` has required H2 sections Delivery policy, Examples
-and Input errors. It is not a report and does not use the JSON metadata above.
-In Examples, use exactly these Markdown table columns:
+Pages under `docs/` are Markdown, ASCII, at most 16 KiB, with H2 sections.
+They are not reports and do not use the JSON metadata above.
 
-```text
-| Case | Subtotal | Delivery | Total | Error |
-| --- | --- | --- | --- | --- |
-```
+Use inline links only, for example `[the module](../src/<package>/<module>.py)` and
+`[errors](#input-errors)`. No query strings or reference-style links. Local
+targets must exist in the combined candidate (the repository's `src/`,
+`tests/`, `docs/`, `acceptance/` and `README.md`, plus the delivered changes);
+H2 fragments must exist. Absolute HTTP(S) links are allowed but not fetched.
 
-Add every canonical case from `checks/software_factory_cases.py` exactly once.
-Write inputs and successful numeric results as JSON literals, preserving
-types: `true` is not `1`, and `"5000"` is not `5000`. For successful rows,
-Error is `-`. For rejected inputs, Delivery and Total are `-` and Error is
-the canonical exception name. Do not wrap individual cells in backticks.
-
-Use inline local file links and H2 fragments, for example
-`[pricing](../src/pricing.py)` and `[examples](#examples)`. No query strings
-or reference-style links. Local targets must be present in the combined
-candidate. Absolute HTTP(S) links are allowed but are not fetched or verified.
-Do not depend on executing fenced code: the checker never runs it.
-
-The checker compares the complete declared table with the fixed cases and
-evaluates those same inputs through the candidate APIs. Another check reruns
-both supplied Gherkin and regression suites on the code-plus-docs tree.
-These finite checks do not prove that all prose is semantically correct.
+The documentation checker requires the new text to add at least one link to a
+`src/` file that the code patch changed. Another check reruns the repository's
+acceptance scenarios and unittest suite on the code-plus-docs tree. These
+finite checks do not prove that all prose is semantically correct.

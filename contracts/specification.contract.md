@@ -6,31 +6,31 @@ produces: specification.md
 verify:
   specification-format-references: python3 -I -B checks/documents.py specification specification.md
 ---
-Turn the admitted plan into a precise, concise specification for the checkout
-feature. Read request.md, plan.md, the source and supplied Gherkin. The request
-and supplied acceptance examples win if the plan conflicts with them.
-The captured project already supplies source and checks; needs names only
-explicit inputs and stage handoffs. Read the common and Specification formats
-in checks/document-formats.md. Start with the required JSON metadata, resolving
-the public interfaces against the captured source and every acceptance ID
-against checks/software_factory_cases.py.
+Turn the admitted plan into a precise, concise specification of the change in
+request.md. Read request.md, plan.md, the relevant source under src/, and the
+repository's acceptance/ features and step definitions: the steps show exactly
+which interfaces, names and values the scenarios call. The request and the
+acceptance scenarios win if the plan conflicts with them.
+The captured project already supplies source, tests and acceptance; needs
+names only explicit inputs and stage handoffs. Read the common, Acceptance IDs
+and Specification formats in checks/document-formats.md. Start with the
+required JSON metadata, resolving each interface against the captured source.
 
 Write specification.md with these nonempty Markdown sections:
 
 ## Behavior
-Define the inclusive free-delivery threshold, the unchanged delivery fee below
-it, zero handling and the relation between delivery and the checkout total.
+Define the new behaviour precisely, including boundaries, and state which
+existing behaviour stays unchanged.
 
 ## Interface
-Record the two public functions, their existing argument and return shapes,
-integer-cent semantics, and the required exceptions for negative and invalid
-inputs, explicitly including booleans.
+Record the public functions, classes, values and errors involved, with their
+argument and return shapes. Amounts of money are integer cents.
 
 ## Acceptance
-Explain the supplied boundary and invalid-input examples and the new
-unittest regression coverage. Do not replace or weaken the supplied feature.
+Explain how each acceptance scenario is satisfied and what new unittest
+coverage will add. Do not replace or weaken the repository's scenarios.
 
-Write the artifact with the permitted file
-tools. Do not modify inputs, implement code, run commands/checks, install or
-delegate. Do not claim observed executions. Keep ASCII Markdown under 16 KiB.
-Format and reference checks do not prove prose semantics; candidate checks decide behavior.
+Write the artifact with the permitted file tools. Do not modify inputs,
+implement code, run commands/checks, install or delegate. Do not claim
+observed executions. Keep ASCII Markdown under 16 KiB. Format and reference
+checks do not prove prose semantics; candidate checks decide behavior.
