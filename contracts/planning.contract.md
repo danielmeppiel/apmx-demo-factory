@@ -8,7 +8,8 @@ Plan the change described in request.md for this repository. The request
 governs the feature, and the repository's acceptance/*.feature scenarios define
 when it is done; your plan proposes the work, not a new business rule.
 Before opening project files, list the src/, tests/, docs/ and acceptance/
-directories with the permitted read tool and use the returned paths.
+directories (and their subdirectories) with the permitted read tool and open
+only the paths it returns; never guess a filename. A failed read stops the run.
 Read the common, Acceptance IDs and Planning formats in
 checks/document-formats.md. Start plan.md with the required JSON metadata,
 listing every acceptance scenario title and distinguishing existing file

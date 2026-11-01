@@ -17,7 +17,8 @@ verify:
 ---
 Update the repository's documentation under docs/ for the admitted change.
 Read request.md, specification.md, changes.diff, implementation.md and the
-captured pages under docs/ (list the directory first). The request and the
+captured pages under docs/. List docs/ and src/ with the permitted read
+tool first and open only the paths it returns; never guess a filename. The request and the
 repository's acceptance scenarios remain authoritative. Both declared outputs
 are new files: documentation.md and documentation.diff are not inputs to read.
 The new documentation.md is a report, not a substitute for updating the pages.
@@ -26,9 +27,9 @@ Read the common, Documentation report and Project documentation pages formats
 in checks/document-formats.md. Use the supplied write_file artifact tool to
 edit only Markdown pages under docs/ (prefer the existing page that covers the
 changed code) and to write documentation.md. Describe the changed behaviour
-for a reader: what now happens, the boundaries, and what stays the same. In the
-new text, link to the src/ files that changes.diff changed, with relative
-inline links that exist in the combined candidate. Do not link to checks/,
+for a reader: what now happens, the boundaries, and what stays the same. At
+least one line you add or rewrite must link to a src/ file that changes.diff
+changed, with a relative inline link (for example from docs/, ../src/...). Do not link to checks/,
 request.md, specification.md, implementation.md or other factory and stage
 files; they are not delivered with the project.
 

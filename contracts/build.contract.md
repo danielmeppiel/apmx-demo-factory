@@ -22,8 +22,10 @@ pass. Read the request, specification, the relevant source, the existing tests
 and the repository's acceptance/ features and step definitions. The request
 and the acceptance scenarios remain authoritative if generated specification
 text conflicts with them. The project files are already captured; needs is not
-a source-file inventory. Before opening project files, list the directories
-with the permitted read tool and use the returned paths rather than guessing.
+a source-file inventory. Before opening project files, list the src/, tests/
+and acceptance/ directories (and their subdirectories) with the permitted read
+tool and open only the paths it returns; never guess a filename. A failed read
+stops the run.
 Read the common and Implementation report formats in checks/document-formats.md.
 
 Edit the actual private working copies of the files under src/ that the change

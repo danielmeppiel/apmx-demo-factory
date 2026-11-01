@@ -15,7 +15,9 @@ specification, both patches and both change reports with request.md and the
 repository's acceptance scenarios. Inspect boundary handling, preserved
 behaviour, input validation, integer-cent money handling, added tests and the
 updated documentation.
-Read the common and Advisory review formats in checks/document-formats.md.
+Read the supplied artifacts and checks/document-formats.md by their exact
+paths; if you open project files, list their directory first and never guess a
+filename. Read the common and Advisory review formats in that file.
 Start review.md with the required JSON metadata. Findings cite existing lines
 of admitted artifacts, not invented candidate paths; an empty findings list is valid.
 
