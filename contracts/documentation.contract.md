@@ -18,7 +18,9 @@ verify:
 Update the repository's documentation under docs/ for the admitted change.
 Read request.md, specification.md, changes.diff, implementation.md and the
 captured pages under docs/. List docs/ and src/ with the permitted read
-tool first and open only the paths it returns; never guess a filename. The request and the
+tool first and open only the paths it returns; never guess a filename.
+Use workspace-relative paths (such as src/, docs/x.md) for every tool call;
+never build absolute paths. The request and the
 repository's acceptance scenarios remain authoritative. Both declared outputs
 are new files: documentation.md and documentation.diff are not inputs to read.
 The new documentation.md is a report, not a substitute for updating the pages.

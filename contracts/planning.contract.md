@@ -10,6 +10,8 @@ when it is done; your plan proposes the work, not a new business rule.
 Before opening project files, list the src/, tests/, docs/ and acceptance/
 directories (and their subdirectories) with the permitted read tool and open
 only the paths it returns; never guess a filename. A failed read stops the run.
+Use workspace-relative paths (such as src/, docs/x.md) for every tool call;
+never build absolute paths.
 Read the common, Acceptance IDs and Planning formats in
 checks/document-formats.md. Start plan.md with the required JSON metadata,
 listing every acceptance scenario title and distinguishing existing file

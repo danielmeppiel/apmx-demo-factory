@@ -30,7 +30,8 @@ Read the common and Implementation report formats in checks/document-formats.md.
 
 Edit the actual private working copies of the files under src/ that the change
 needs. Use the supplied write_file artifact tool with the file's path and
-complete content, and workspace-relative paths for every tool call. Preserve
+complete content, and workspace-relative paths for every tool call (never
+build absolute paths). Preserve
 existing interfaces and behaviour that the request does not change.
 
 Add at least one new test module under tests/ (tests/test_<topic>.py) using

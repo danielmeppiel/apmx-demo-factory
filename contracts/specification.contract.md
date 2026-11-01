@@ -15,7 +15,9 @@ The captured project already supplies source, tests and acceptance; needs
 names only explicit inputs and stage handoffs. Before opening project files,
 list the src/, tests/ and acceptance/ directories (and their subdirectories)
 with the permitted read tool and open only the paths it returns; never guess a
-filename. A failed read stops the run. Read the common, Acceptance IDs
+filename. A failed read stops the run. Use workspace-relative paths (such as
+src/, docs/x.md) for every tool call; never build absolute paths.
+Read the common, Acceptance IDs
 and Specification formats in checks/document-formats.md. Start with the
 required JSON metadata, resolving each interface against the captured source.
 
